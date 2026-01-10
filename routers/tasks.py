@@ -4,8 +4,17 @@ from utils.helpers import serialize
 from bson import ObjectId
 from typing import List, Optional, Literal
 from datetime import datetime
+from pydantic import BaseModel
 
 router = APIRouter()
+
+
+class TaskCommentRequest(BaseModel):
+    """Request model for saving task comments"""
+    userId: str
+    taskId: str
+    comment: str
+    commentBy: Optional[Literal["user", "admin"]] = "user"
 
 
 @router.post("/", response_model=Task, status_code=201)
@@ -252,4 +261,62 @@ async def delete_user_task(request: Request, payload: dict = Body(...)):
     return {
         "status": "success",
         "message": f"Task {task_id} deleted from user {user_id}'s assignments"
+    }
+
+
+@router.post("/task-comments", status_code=200)
+async def save_task_comment(request: Request, payload: TaskCommentRequest = Body(...)):
+    """
+    Save a comment for a specific task in the assignments collection.
+    Adds a new comment to the task's comments array.
+    
+    Request body:
+    - userId: str (required) - The ID of the user
+    - taskId: str (required) - The ID of the task
+    - comment: str (required) - The comment text
+    - commentBy: str (optional) - Either "user" or "admin", defaults to "user"
+    """
+    db = request.app.state.db
+    
+    # Validate that comment is not empty after stripping
+    if not payload.comment.strip():
+        raise HTTPException(status_code=400, detail="comment cannot be empty")
+    
+    # Verify user assignment exists
+    assignment = await db.assignments.find_one({"userId": payload.userId})
+    if not assignment:
+        raise HTTPException(status_code=404, detail="No assignments found for this user")
+    
+    # Verify task exists in user's assignments
+    task_found = any(task.get("taskId") == payload.taskId for task in assignment.get("tasks", []))
+    if not task_found:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Task {payload.taskId} not found in user's assignments"
+        )
+    
+    # Create comment object
+    new_comment = {
+        "comment": payload.comment.strip(),
+        "commentBy": payload.commentBy,
+        "createdAt": datetime.now()
+    }
+    
+    # Add comment to the task's comments array
+    result = await db.assignments.update_one(
+        {"userId": payload.userId},
+        {"$push": {"tasks.$[elem].comments": new_comment}},
+        array_filters=[{"elem.taskId": payload.taskId}]
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=500, 
+            detail="Failed to save comment"
+        )
+    
+    return {
+        "status": "success",
+        "message": "Comment saved successfully",
+        "comment": new_comment
     }

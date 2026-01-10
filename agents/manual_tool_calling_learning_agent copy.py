@@ -1,7 +1,6 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
 from langsmith import traceable
 import os
 from dotenv import load_dotenv
@@ -41,10 +40,10 @@ async def run_learning_agent(db, user_id: str) -> dict:
     Simple learning agent that:
     1. Fetches user goals
     2. Fetches project and tasks
-    3. Recommends 6 tasks based on goals
+    3. Recommends 3 tasks based on goals
     4. Assigns tasks to user
     
-    Uses LangGraph's create_react_agent for automatic tool calling.
+    No complex graphs - just simple tool calling loop.
     """
     try:
         print(f"\n{'='*60}")
@@ -57,7 +56,7 @@ async def run_learning_agent(db, user_id: str) -> dict:
             raise ValueError("GOOGLE_API_KEY not found")
         
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             temperature=0.7,
             google_api_key=api_key
         )
@@ -175,12 +174,13 @@ async def run_learning_agent(db, user_id: str) -> dict:
                 print(f"❌ Error: {str(e)}")
                 return {"error": str(e)}
         
-        # Collect tools
+        # Bind tools to LLM
         tools = [get_user_goals, get_project_details, get_project_tasks, assign_task_to_user]
+        llm_with_tools = llm.bind_tools(tools)
         
-        print("✅ Tools defined\n")
+        print("✅ Tools bound to LLM\n")
         
-        # Create the system prompt
+        # Create the prompt
         system_prompt = """You are an expert learning path advisor with access to tools.
 
 Your task:
@@ -221,39 +221,90 @@ Please create my personalized learning path:
 
 Remember: The order matters! Start with foundational concepts, then build up to advanced topics."""
 
-        print("🤖 Creating LangGraph ReAct agent...\n")
+        # Initialize conversation
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt)
+        ]
         
-        # Create the ReAct agent - LangGraph handles all the tool calling logic!
-        agent = create_react_agent(llm, tools)
+        print("📊 Starting tool calling loop...\n")
         
-        print("✅ Agent created\n")
-        print("🔄 Running agent (LangGraph will handle tool calls automatically)...\n")
+        # Tool calling loop - LLM will call tools until it has the answer
+        max_iterations = 15
+        iteration = 0
         
-        # Run the agent with system prompt in messages
-        result = await agent.ainvoke({
-            "messages": [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt)
-            ]
-        })
-        
-        print("✅ Agent execution completed\n")
-        
-        # Extract final response from the last message
-        final_message = result["messages"][-1]
-        final_response = final_message.content if hasattr(final_message, 'content') else str(final_message)
-        
-        # Handle list content from Gemini
-        if isinstance(final_response, list):
-            content_parts = []
-            for part in final_response:
-                if isinstance(part, str):
-                    content_parts.append(part)
-                elif hasattr(part, 'text'):
-                    content_parts.append(part.text)
+        while iteration < max_iterations:
+            iteration += 1
+            print(f"🔄 Iteration {iteration}")
+            
+            # Call LLM
+            response = await llm_with_tools.ainvoke(messages)
+            messages.append(response)
+            
+            # Check if there are tool calls
+            if not hasattr(response, 'tool_calls') or not response.tool_calls:
+                # No more tool calls - we're done
+                print(f"✅ No more tool calls - agent completed\n")
+                break
+            
+            # Execute each tool call
+            print(f"🔧 Executing {len(response.tool_calls)} tool call(s)")
+            
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+                tool_id = tool_call["id"]
+                
+                # Find the tool
+                tool_func = next((t for t in tools if t.name == tool_name), None)
+                
+                if tool_func:
+                    # Execute the tool
+                    result = await tool_func.ainvoke(tool_args)
+                    
+                    # Add tool result to messages
+                    messages.append(
+                        ToolMessage(
+                            content=str(result),
+                            tool_call_id=tool_id,
+                            name=tool_name
+                        )
+                    )
                 else:
-                    content_parts.append(str(part))
-            final_response = ''.join(content_parts).strip()
+                    print(f"❌ Tool {tool_name} not found")
+            
+            print()  # Empty line for readability
+        
+        if iteration >= max_iterations:
+            print("⚠️  Max iterations reached")
+        
+        # Extract final response
+        final_response = None
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and msg.content:
+                # Handle both string and list content from Gemini
+                if isinstance(msg.content, str):
+                    content_str = msg.content.strip()
+                    if content_str:
+                        final_response = content_str
+                        break
+                elif isinstance(msg.content, list):
+                    # Content is a list of parts - join them
+                    content_parts = []
+                    for part in msg.content:
+                        if isinstance(part, str):
+                            content_parts.append(part)
+                        elif hasattr(part, 'text'):
+                            content_parts.append(part.text)
+                        else:
+                            content_parts.append(str(part))
+                    content_str = ''.join(content_parts).strip()
+                    if content_str:
+                        final_response = content_str
+                        break
+        
+        if not final_response:
+            final_response = "I processed your request but couldn't generate a final response."
         
         print(f"{'='*60}")
         print(f"✅ Agent completed successfully")
@@ -262,8 +313,7 @@ Remember: The order matters! Start with foundational concepts, then build up to 
         
         return {
             "response_text": final_response,
-            "status": "success",
-            "messages": result["messages"]  # Optional: include full message history
+            "status": "success"
         }
         
     except Exception as e:
