@@ -13,6 +13,17 @@ class AgentRequest(BaseModel):
     userId: str
 
 
+class ManageAgentRequest(BaseModel):
+    """Request model for managing agent name"""
+    userId: str
+    agentName: str
+
+
+class GetAgentRequest(BaseModel):
+    """Request model for getting agent details"""
+    userId: str
+
+
 def serialize(doc):
     """Helper to convert MongoDB _id to string id"""
     if not doc: 
@@ -65,3 +76,77 @@ async def get_chat_history(request: Request, user_id: str):
     db = request.app.state.db
     cursor = db.chats.find({"userId": user_id}).sort("timestamp", 1)
     return [serialize(doc) async for doc in cursor]
+
+
+@router.post("/manage-agent", status_code=200)
+async def manage_agent(request: Request, agent_req: ManageAgentRequest = Body(...)):
+    """
+    Create or update agent name for a user.
+    """
+    db = request.app.state.db
+    user_id = agent_req.userId
+    agent_name = agent_req.agentName
+
+    print(f"📝 Managing agent for user: {user_id}")
+
+    # Validate agent name
+    if not agent_name or not agent_name.strip():
+        raise HTTPException(status_code=400, detail="Agent name cannot be empty")
+
+    # Upsert agent document
+    result = await db.agents.update_one(
+        {"userId": user_id},
+        {
+            "$set": {
+                "agentName": agent_name.strip(),
+                "updated_at": datetime.now()
+            },
+            "$setOnInsert": {
+                "created_at": datetime.now()
+            }
+        },
+        upsert=True
+    )
+
+    # Fetch the updated/created agent
+    agent = await db.agents.find_one({"userId": user_id})
+    
+    print(f"✅ Agent {'updated' if result.modified_count > 0 else 'created'} successfully")
+    
+    return {
+        "status": "success",
+        "message": f"Agent name {'updated' if result.modified_count > 0 else 'created'} successfully",
+        "agent": serialize(agent)
+    }
+
+
+@router.post("/get-agent", status_code=200)
+async def get_agent(request: Request, agent_req: GetAgentRequest = Body(...)):
+    """
+    Get agent details for a specific user.
+    """
+    db = request.app.state.db
+    user_id = agent_req.userId
+
+    print(f"🔍 Fetching agent for user: {user_id}")
+
+    # Find agent document
+    agent = await db.agents.find_one({"userId": user_id})
+    
+    if not agent:
+        # Return default agent name if not found
+        return {
+            "status": "success",
+            "agent": {
+                "userId": user_id,
+                "agentName": "Study Buddy",
+                "isDefault": True
+            }
+        }
+    
+    print(f"✅ Agent found: {agent.get('agentName')}")
+    
+    return {
+        "status": "success",
+        "agent": serialize(agent)
+    }
