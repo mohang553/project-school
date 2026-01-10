@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Request, Body, HTTPException
 from datetime import datetime
 from models import Chat
-from agents.learning_agent import run_learning_agent
+from agents.learning_agent import run_learning_agent, handle_agent_name_update
 from bson import ObjectId
 from pydantic import BaseModel
+from typing import Optional
 
 router = APIRouter()
 
@@ -11,6 +12,7 @@ router = APIRouter()
 class AgentRequest(BaseModel):
     """Simplified request model for agent endpoint"""
     userId: str
+    message: Optional[str] = None
 
 
 class ManageAgentRequest(BaseModel):
@@ -36,17 +38,28 @@ def serialize(doc):
 async def chat_with_agent(request: Request, agent_req: AgentRequest = Body(...)):
     """
     Invoke the learning agent for a user.
+    Optionally accepts a message parameter for special operations like agent name updates.
     """
     db = request.app.state.db
     user_id = agent_req.userId
+    message = agent_req.message
 
     print(f"🚀 Agent invoked for user: {user_id}")
+    if message:
+        print(f"📝 With message: {message}")
 
     try:
-        print("⚙️ Running learning agent...")
-        result = await run_learning_agent(db, user_id)
-        agent_response = result.get("response_text", "I couldn't process your request.")
-        status = result.get("status", "error")
+        # Check if this is an agent name update message
+        if message and message.startswith("Updated the name of the agent to "):
+            print("🔄 Detected agent name update message")
+            agent_response = await handle_agent_name_update(db, user_id, message)
+            status = "success"
+        else:
+            # Regular learning agent invocation
+            print("⚙️ Running learning agent...")
+            result = await run_learning_agent(db, user_id)
+            agent_response = result.get("response_text", "I couldn't process your request.")
+            status = result.get("status", "error")
         
         print(f"✅ Agent completed with status: {status}")
     except Exception as e:
